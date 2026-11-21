@@ -123,7 +123,7 @@ def action_keyboard(media_type: str):
 def run_ffmpeg(cmd: list):
     res = subprocess.run(cmd, capture_output=True, text=True)
     if res.returncode != 0:
-        raise RuntimeError(res.stderr[-300:] if res.stderr else "ffmpeg error")
+        raise RuntimeError(res.stderr[-400:] if res.stderr else "ffmpeg error")
 
 
 def probe_tags_and_cover(src_path: str, chat_id: int):
@@ -189,6 +189,35 @@ def trim_media_file(src_path: str, dst_path: str, media_type: str, start_sec: fl
 
     cmd.append(dst_path)
     run_ffmpeg(cmd)
+
+
+def apply_bw_filter(active_input: str, out_path: str):
+    vf_chain = "hue=s=0,scale=trunc(iw/2)*2:trunc(ih/2)*2"
+    cmd_with_audio = [
+        "ffmpeg", "-y",
+        "-i", active_input,
+        "-map", "0:v:0",
+        "-map", "0:a?",
+        "-vf", vf_chain,
+        "-pix_fmt", "yuv420p",
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "24",
+        "-c:a", "aac", "-b:a", "128k",
+        out_path,
+    ]
+    try:
+        run_ffmpeg(cmd_with_audio)
+    except Exception:
+        cmd_no_audio = [
+            "ffmpeg", "-y",
+            "-i", active_input,
+            "-map", "0:v:0",
+            "-vf", vf_chain,
+            "-pix_fmt", "yuv420p",
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "24",
+            "-an",
+            out_path,
+        ]
+        run_ffmpeg(cmd_no_audio)
 
 
 def build_mp3_with_options(
@@ -332,14 +361,7 @@ def process_and_send(chat_id: int, status_msg_id=None):
             if action == "act_bw":
                 out_path = f"out_bw_{chat_id}.mp4"
                 session["extra_files"].append(out_path)
-                cmd = [
-                    "ffmpeg", "-y", "-i", active_input,
-                    "-vf", "hue=s=0",
-                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "24",
-                    "-c:a", "aac", "-b:a", "128k",
-                    out_path,
-                ]
-                run_ffmpeg(cmd)
+                apply_bw_filter(active_input, out_path)
                 if custom_name:
                     renamed_path = f"{custom_name}.mp4"
                     os.replace(out_path, renamed_path)
