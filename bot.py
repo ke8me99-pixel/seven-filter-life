@@ -1,3 +1,6 @@
+المستودع: ke8me99-pixel/seven-filter-life
+المسار: bot.py
+المحتوى:
 import os
 import subprocess
 import telebot
@@ -42,4 +45,14 @@ def handle_video(message):
         with open(output_path, 'rb') as video_out:
             bot.send_video(message.chat.id, video_out, caption=MSG_DONE)
 
-        bot.delete_message(message.chat
+        bot.delete_message(message.chat.id, msg.message_id)
+
+    except Exception:
+        bot.edit_message_text(MSG_ERROR, message.chat.id, msg.message_id)
+
+    finally:
+        for path in (input_path, output_path):
+            if os.path.exists(path):
+                os.remove(path)
+
+bot.infinity_polling(skip_pending=True)
