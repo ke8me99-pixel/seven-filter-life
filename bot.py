@@ -123,7 +123,9 @@ def action_keyboard(media_type: str):
 def run_ffmpeg(cmd: list):
     res = subprocess.run(cmd, capture_output=True, text=True)
     if res.returncode != 0:
-        raise RuntimeError(res.stderr[-400:] if res.stderr else "ffmpeg error")
+        err_tail = res.stderr[-500:] if res.stderr else "ffmpeg error"
+        print("FFMPEG_STDERR:", err_tail, flush=True)
+        raise RuntimeError(err_tail)
 
 
 def probe_tags_and_cover(src_path: str, chat_id: int):
@@ -192,32 +194,37 @@ def trim_media_file(src_path: str, dst_path: str, media_type: str, start_sec: fl
 
 
 def apply_bw_filter(active_input: str, out_path: str):
-    vf_chain = "hue=s=0,scale=trunc(iw/2)*2:trunc(ih/2)*2"
-    cmd_with_audio = [
-        "ffmpeg", "-y",
+    vf_chain = "hue=s=0,scale='if(gte(iw,2),trunc(iw/2)*2,2)':'if(gte(ih,2),trunc(ih/2)*2,2)'"
+    base_video_args = [
+        "-fflags", "+genpts",
         "-i", active_input,
         "-map", "0:v:0",
-        "-map", "0:a?",
         "-vf", vf_chain,
         "-pix_fmt", "yuv420p",
-        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "24",
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "25", "-threads", "2",
+        "-movflags", "+faststart",
+    ]
+
+    cmd_with_audio = [
+        "ffmpeg", "-y",
+        *base_video_args,
+        "-map", "0:a?",
         "-c:a", "aac", "-b:a", "128k",
         out_path,
     ]
     try:
         run_ffmpeg(cmd_with_audio)
+        return
     except Exception:
-        cmd_no_audio = [
-            "ffmpeg", "-y",
-            "-i", active_input,
-            "-map", "0:v:0",
-            "-vf", vf_chain,
-            "-pix_fmt", "yuv420p",
-            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "24",
-            "-an",
-            out_path,
-        ]
-        run_ffmpeg(cmd_no_audio)
+        pass
+
+    cmd_no_audio = [
+        "ffmpeg", "-y",
+        *base_video_args,
+        "-an",
+        out_path,
+    ]
+    run_ffmpeg(cmd_no_audio)
 
 
 def build_mp3_with_options(
