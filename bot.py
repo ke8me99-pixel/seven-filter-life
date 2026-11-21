@@ -42,8 +42,7 @@ def is_allowed(user_id) -> bool:
 
 def sanitize_filename(name: str) -> str:
     cleaned = re.sub(r'[\\/*?:"<>|\r\n]+', "_", name).strip()
-    if cleaned.lower().endswith(".mp3"):
-        cleaned = cleaned[:-4].strip()
+    cleaned = re.sub(r"\.(mp3|m4a|ogg|aac|wav|mp4)$", "", cleaned, flags=re.IGNORECASE).strip()
     return cleaned or "audio"
 
 
@@ -123,24 +122,31 @@ def run_ffmpeg(cmd: list):
         raise RuntimeError(res.stderr[-300:] if res.stderr else "ffmpeg error")
 
 
-def trim_media_file(src_path: str, dst_path: str, media_type: str, start_sec: float, end_sec: float):
+def trim_media_file(src_path: str, dst_path: str, media_type: str, start_sec: float, end_sec: float, preserve_meta: bool = False):
     cmd = [
         "ffmpeg", "-y",
         "-ss", str(start_sec),
         "-to", str(end_sec),
         "-i", src_path,
     ]
+    if preserve_meta:
+        cmd += ["-map_metadata", "0"]
+
     if media_type == "video":
         cmd += ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "24", "-c:a", "aac", "-b:a", "128k"]
     elif media_type == "voice":
         cmd += ["-c:a", "libopus", "-b:a", "64k"]
     else:
+        if preserve_meta:
+            cmd += ["-map", "0:a", "-map", "0:v?"]
         if dst_path.lower().endswith(".ogg"):
             cmd += ["-c:a", "libopus", "-b:a", "64k"]
         elif dst_path.lower().endswith(".m4a") or dst_path.lower().endswith(".aac"):
             cmd += ["-c:a", "aac", "-b:a", "192k"]
         else:
             cmd += ["-c:a", "libmp3lame", "-b:a", "192k"]
+        if preserve_meta:
+            cmd += ["-c:v", "copy", "-disposition:v:0", "attached_pic"]
 
     cmd.append(dst_path)
     run_ffmpeg(cmd)
@@ -173,7 +179,7 @@ def process_and_send(chat_id: int, status_msg_id=None):
                 raise ValueError("Missing trim range")
             start_sec, end_sec = trim
             base_out = f"cut_only_{chat_id}{ext}"
-            trim_media_file(raw_path, base_out, media_type, start_sec, end_sec)
+            trim_media_file(raw_path, base_out, media_type, start_sec, end_sec, preserve_meta=True)
             session["extra_files"].append(base_out)
 
             final_path = base_out
@@ -195,7 +201,7 @@ def process_and_send(chat_id: int, status_msg_id=None):
             if trim:
                 start_sec, end_sec = trim
                 trimmed_path = f"trim_{chat_id}{ext}"
-                trim_media_file(raw_path, trimmed_path, media_type, start_sec, end_sec)
+                trim_media_file(raw_path, trimmed_path, media_type, start_sec, end_sec, preserve_meta=(media_type == "audio"))
                 session["extra_files"].append(trimmed_path)
                 active_input = trimmed_path
 
