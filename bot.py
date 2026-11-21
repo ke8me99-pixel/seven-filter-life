@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import subprocess
@@ -6,6 +7,13 @@ from telebot import types
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "9114458150:AAHpOOt4Hy0BFjVSjRNaC0OdyYHYnUYo4hQ")
 ALLOWED_USER_ID = 1343392055
+
+# مفاتيح/روابط خدمات خارجية اختيارية في Railway (تُضاف في Variables عند الحاجة)
+STT_API_URL = os.getenv("STT_API_URL", "").strip()
+SONG_RECOGNIZE_API_URL = os.getenv("SONG_RECOGNIZE_API_URL", "").strip()
+VOCALS_API_URL = os.getenv("VOCALS_API_URL", "").strip()
+LYRICS_API_URL = os.getenv("LYRICS_API_URL", "").strip()
+
 bot = telebot.TeleBot(BOT_TOKEN)
 
 MSG_WELCOME = "𝖜𝖊𝖑𝖈𝖔𝖒𝖊 𝖜𝖎𝖙𝖍 𝖘𝖊𝟕𝖊𝖓"
@@ -28,6 +36,11 @@ BTN_CUT_ONLY = "𝖈𝖚𝖙 𝖔𝖓𝖑𝖞"
 BTN_FILTER = "𝖋𝖎𝖑𝖙𝖊𝖗"
 BTN_MP3 = "𝖒𝖕3"
 BTN_VOICE = "𝖛𝖔𝖎𝖈𝖊"
+
+BTN_STT = "𝖘𝖙𝖙"
+BTN_FIND_SONG = "𝖋𝖎𝖓𝖉"
+BTN_VOCALS_ONLY = "𝖛𝖔𝖈𝖆𝖑𝖘"
+BTN_LYRICS_ONLY = "𝖑𝖞𝖗𝖎𝖈𝖘"
 
 BTN_KEEP = "𝖐𝖊𝖊𝖕"
 BTN_CHANGE = "𝖈𝖍𝖆𝖓𝖌𝖊"
@@ -113,6 +126,15 @@ def action_keyboard(media_type: str):
             types.InlineKeyboardButton(BTN_MP3, callback_data="act_mp3"),
             types.InlineKeyboardButton(BTN_VOICE, callback_data="act_voice"),
         )
+
+    kb.add(
+        types.InlineKeyboardButton(BTN_STT, callback_data="act_stt"),
+        types.InlineKeyboardButton(BTN_FIND_SONG, callback_data="act_find"),
+    )
+    kb.add(
+        types.InlineKeyboardButton(BTN_VOCALS_ONLY, callback_data="act_vocals"),
+        types.InlineKeyboardButton(BTN_LYRICS_ONLY, callback_data="act_lyrics"),
+    )
     return kb
 
 
@@ -122,12 +144,46 @@ def run_ffmpeg(cmd: list):
         raise RuntimeError(res.stderr[-300:] if res.stderr else "ffmpeg error")
 
 
+def probe_tags_and_cover(src_path: str, chat_id: int):
+    meta = {"artist": None, "title": None, "extracted_cover": None}
+    try:
+        probe = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", src_path],
+            capture_output=True,
+            text=True,
+        )
+        if probe.returncode == 0 and probe.stdout:
+            data = json.loads(probe.stdout)
+            tags = (data.get("format") or {}).get("tags") or {}
+            lower_tags = {k.lower(): v for k, v in tags.items()}
+            meta["artist"] = lower_tags.get("artist") or lower_tags.get("album_artist")
+            meta["title"] = lower_tags.get("title")
+    except Exception:
+        pass
+
+    cov_out = f"orig_cov_{chat_id}.jpg"
+    ext_res = subprocess.run(
+        ["ffmpeg", "-y", "-i", src_path, "-an", "-c:v", "mjpeg", "-frames:v", "1", cov_out],
+        capture_output=True,
+        text=True,
+    )
+    if ext_res.returncode == 0 and os.path.exists(cov_out) and os.path.getsize(cov_out) > 0:
+        meta["extracted_cover"] = cov_out
+    else:
+        if os.path.exists(cov_out):
+            try:
+                os.remove(cov_out)
+            except Exception:
+                pass
+    return meta
+
+
 def trim_media_file(src_path: str, dst_path: str, media_type: str, start_sec: float, end_sec: float, preserve_meta: bool = False):
     cmd = [
         "ffmpeg", "-y",
+        "-i", src_path,
         "-ss", str(start_sec),
         "-to", str(end_sec),
-        "-i", src_path,
     ]
     if preserve_meta:
         cmd += ["-map_metadata", "0"]
@@ -146,10 +202,48 @@ def trim_media_file(src_path: str, dst_path: str, media_type: str, start_sec: fl
         else:
             cmd += ["-c:a", "libmp3lame", "-b:a", "192k"]
         if preserve_meta:
-            cmd += ["-c:v", "copy", "-disposition:v:0", "attached_pic"]
+            cmd += ["-c:v", "mjpeg", "-disposition:v:0", "attached_pic"]
 
     cmd.append(dst_path)
     run_ffmpeg(cmd)
+
+
+def extract_temp_mp3(src_path: str, dst_mp3: str):
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", src_path,
+        "-vn",
+        "-c:a", "libmp3lame", "-b:a", "192k",
+        dst_mp3,
+    ]
+    run_ffmpeg(cmd)
+
+
+def handle_text_feature(chat_id: int, action: str, active_input: str, session: dict):
+    # يحضّر ملف صوتي مؤقت إذا احتاجت الخدمة الصوت مباشرة
+    temp_audio = f"feat_{chat_id}.mp3"
+    extract_temp_mp3(active_input, temp_audio)
+    session["extra_files"].append(temp_audio)
+
+    if action == "act_stt":
+        if not STT_API_URL:
+            raise RuntimeError("STT_API_URL not configured")
+        raise RuntimeError("STT endpoint not wired")
+
+    elif action == "act_find":
+        if not SONG_RECOGNIZE_API_URL:
+            raise RuntimeError("SONG_RECOGNIZE_API_URL not configured")
+        raise RuntimeError("Song recognition endpoint not wired")
+
+    elif action == "act_vocals":
+        if not VOCALS_API_URL:
+            raise RuntimeError("VOCALS_API_URL not configured")
+        raise RuntimeError("Vocals extraction endpoint not wired")
+
+    elif action == "act_lyrics":
+        if not LYRICS_API_URL:
+            raise RuntimeError("LYRICS_API_URL not configured")
+        raise RuntimeError("Lyrics endpoint not wired")
 
 
 def process_and_send(chat_id: int, status_msg_id=None):
@@ -174,6 +268,14 @@ def process_and_send(chat_id: int, status_msg_id=None):
         trim = session.get("trim")
         custom_name = session.get("custom_name")
 
+        orig_meta = probe_tags_and_cover(raw_path, chat_id)
+        if orig_meta.get("extracted_cover"):
+            session["extra_files"].append(orig_meta["extracted_cover"])
+
+        orig_artist = session.get("orig_performer") or orig_meta.get("artist")
+        orig_title = session.get("orig_title") or orig_meta.get("title")
+        orig_cover = orig_meta.get("extracted_cover")
+
         if action == "cut_only":
             if not trim:
                 raise ValueError("Missing trim range")
@@ -188,13 +290,25 @@ def process_and_send(chat_id: int, status_msg_id=None):
                 os.replace(base_out, final_path)
                 session["extra_files"].append(final_path)
 
-            with open(final_path, "rb") as f:
-                if media_type == "video":
-                    bot.send_video(chat_id, f, caption=MSG_DONE)
-                elif media_type == "voice":
-                    bot.send_voice(chat_id, f, caption=MSG_DONE)
-                else:
-                    bot.send_audio(chat_id, f, caption=MSG_DONE)
+            thumb_arg = open(orig_cover, "rb") if (orig_cover and os.path.exists(orig_cover)) else None
+            try:
+                with open(final_path, "rb") as f:
+                    if media_type == "video":
+                        bot.send_video(chat_id, f, caption=MSG_DONE)
+                    elif media_type == "voice":
+                        bot.send_voice(chat_id, f, caption=MSG_DONE)
+                    else:
+                        bot.send_audio(
+                            chat_id,
+                            f,
+                            caption=MSG_DONE,
+                            title=custom_name if custom_name else orig_title,
+                            performer=orig_artist,
+                            thumb=thumb_arg,
+                        )
+            finally:
+                if thumb_arg:
+                    thumb_arg.close()
 
         else:
             active_input = raw_path
@@ -250,18 +364,25 @@ def process_and_send(chat_id: int, status_msg_id=None):
                 artist_mode = session.get("artist_mode", "keep")
                 artist_name = session.get("artist_name")
 
+                effective_cover = None
                 if cover_mode == "change" and cover_path and os.path.exists(cover_path):
+                    effective_cover = cover_path
+                elif cover_mode == "keep" and orig_cover and os.path.exists(orig_cover):
+                    effective_cover = orig_cover
+
+                if effective_cover:
                     cmd = [
                         "ffmpeg", "-y",
                         "-i", active_input,
-                        "-i", cover_path,
+                        "-i", effective_cover,
                         "-map", "0:a",
                         "-map", "1:v",
+                        "-map_metadata", "0",
                         "-c:a", "libmp3lame", "-b:a", "192k",
                         "-c:v", "mjpeg",
                         "-disposition:v:0", "attached_pic",
                     ]
-                elif cover_mode == "remove":
+                else:
                     cmd = [
                         "ffmpeg", "-y",
                         "-i", active_input,
@@ -269,24 +390,21 @@ def process_and_send(chat_id: int, status_msg_id=None):
                         "-map_metadata", "0",
                         "-c:a", "libmp3lame", "-b:a", "192k",
                     ]
-                else:
-                    cmd = [
-                        "ffmpeg", "-y",
-                        "-i", active_input,
-                        "-map", "0:a",
-                        "-map", "0:v?",
-                        "-c:a", "libmp3lame", "-b:a", "192k",
-                        "-c:v", "copy",
-                        "-disposition:v:0", "attached_pic",
-                    ]
 
+                final_artist = None
                 if artist_mode == "change" and artist_name:
-                    cmd += ["-metadata", f"artist={artist_name}", "-metadata", f"album_artist={artist_name}"]
+                    final_artist = artist_name
+                    cmd += ["-metadata", f"artist={final_artist}", "-metadata", f"album_artist={final_artist}"]
+                elif artist_mode == "keep" and orig_artist:
+                    final_artist = orig_artist
+                    cmd += ["-metadata", f"artist={final_artist}", "-metadata", f"album_artist={final_artist}"]
                 elif artist_mode == "remove":
+                    final_artist = None
                     cmd += ["-metadata", "artist=", "-metadata", "album_artist="]
 
-                if custom_name:
-                    cmd += ["-metadata", f"title={custom_name}"]
+                final_title = custom_name if custom_name else orig_title
+                if final_title:
+                    cmd += ["-metadata", f"title={final_title}"]
 
                 cmd.append(temp_mp3)
                 run_ffmpeg(cmd)
@@ -297,9 +415,7 @@ def process_and_send(chat_id: int, status_msg_id=None):
                     os.replace(temp_mp3, final_mp3)
                     session["extra_files"].append(final_mp3)
 
-                thumb_arg = None
-                if cover_mode == "change" and cover_path and os.path.exists(cover_path):
-                    thumb_arg = open(cover_path, "rb")
+                thumb_arg = open(effective_cover, "rb") if effective_cover else None
 
                 try:
                     with open(final_mp3, "rb") as f:
@@ -307,13 +423,16 @@ def process_and_send(chat_id: int, status_msg_id=None):
                             chat_id,
                             f,
                             caption=MSG_DONE,
-                            title=custom_name if custom_name else None,
-                            performer=artist_name if artist_mode == "change" and artist_name else None,
+                            title=final_title,
+                            performer=final_artist,
                             thumb=thumb_arg,
                         )
                 finally:
                     if thumb_arg:
                         thumb_arg.close()
+
+            elif action in ("act_stt", "act_find", "act_vocals", "act_lyrics"):
+                handle_text_feature(chat_id, action, active_input, session)
 
         try:
             bot.delete_message(chat_id, status_msg_id)
@@ -354,7 +473,7 @@ def cleanup_session(chat_id: int):
             pass
 
 
-def start_media_flow(message, file_id: str, media_type: str, ext: str):
+def start_media_flow(message, file_id: str, media_type: str, ext: str, orig_performer=None, orig_title=None):
     chat_id = message.chat.id
     cleanup_session(chat_id)
 
@@ -377,6 +496,8 @@ def start_media_flow(message, file_id: str, media_type: str, ext: str):
         "artist_mode": "keep",
         "artist_name": None,
         "custom_name": None,
+        "orig_performer": orig_performer,
+        "orig_title": orig_title,
     }
     bot.reply_to(message, MSG_ASK_CUT, reply_markup=cut_keyboard())
 
@@ -400,7 +521,14 @@ def on_audio(message):
     if not message.from_user or not is_allowed(message.from_user.id):
         return
     ext = os.path.splitext(message.audio.file_name or "")[1].lower() or ".mp3"
-    start_media_flow(message, message.audio.file_id, "audio", ext)
+    start_media_flow(
+        message,
+        message.audio.file_id,
+        "audio",
+        ext,
+        orig_performer=message.audio.performer,
+        orig_title=message.audio.title,
+    )
 
 
 @bot.message_handler(content_types=["voice"])
@@ -416,144 +544,4 @@ def on_photo(message):
         return
     chat_id = message.chat.id
     session = user_sessions.get(chat_id)
-    if not session or session.get("step") != "waiting_cover":
-        return
-
-    file_id = message.photo[-1].file_id
-    file_info = bot.get_file(file_id)
-    downloaded = bot.download_file(file_info.file_path)
-    cover_path = f"cover_{chat_id}.jpg"
-    with open(cover_path, "wb") as f:
-        f.write(downloaded)
-
-    session["cover_mode"] = "change"
-    session["cover_path"] = cover_path
-    session["step"] = "ask_artist"
-    bot.send_message(chat_id, MSG_ASK_ARTIST, reply_markup=keep_change_remove_keyboard("art"))
-
-
-@bot.message_handler(func=lambda m: True, content_types=["text"])
-def on_text(message):
-    if not message.from_user or not is_allowed(message.from_user.id):
-        return
-    chat_id = message.chat.id
-    session = user_sessions.get(chat_id)
-    if not session:
-        return
-
-    step = session.get("step")
-    text = (message.text or "").strip()
-
-    if step == "waiting_range":
-        try:
-            session["trim"] = parse_trim_range(text)
-            if session.get("action") == "cut_only":
-                session["step"] = "ask_rename"
-                bot.send_message(chat_id, MSG_ASK_RENAME, reply_markup=yes_no_keyboard("ren"))
-            else:
-                session["step"] = "choose_action"
-                bot.send_message(chat_id, MSG_ASK_ACTION, reply_markup=action_keyboard(session["media_type"]))
-        except Exception:
-            bot.send_message(chat_id, MSG_ERROR)
-
-    elif step == "waiting_artist":
-        if not text:
-            bot.send_message(chat_id, MSG_ERROR)
-            return
-        session["artist_mode"] = "change"
-        session["artist_name"] = text
-        session["step"] = "ask_rename"
-        bot.send_message(chat_id, MSG_ASK_RENAME, reply_markup=yes_no_keyboard("ren"))
-
-    elif step == "waiting_filename":
-        cleaned = sanitize_filename(text)
-        if not cleaned:
-            bot.send_message(chat_id, MSG_ERROR)
-            return
-        session["custom_name"] = cleaned
-        session["step"] = "processing"
-        process_and_send(chat_id)
-
-
-@bot.callback_query_handler(func=lambda call: True)
-def on_callback(call):
-    if not call.from_user or not is_allowed(call.from_user.id):
-        return
-    chat_id = call.message.chat.id
-    data = call.data
-    session = user_sessions.get(chat_id)
-
-    if not session:
-        bot.answer_callback_query(call.id, MSG_ERROR)
-        return
-
-    bot.answer_callback_query(call.id)
-
-    if data == "cut_yes":
-        session["action"] = None
-        session["step"] = "waiting_range"
-        bot.send_message(chat_id, MSG_ASK_RANGE)
-
-    elif data == "cut_only":
-        session["action"] = "cut_only"
-        session["step"] = "waiting_range"
-        bot.send_message(chat_id, MSG_ASK_RANGE)
-
-    elif data == "cut_no":
-        session["trim"] = None
-        session["action"] = None
-        session["step"] = "choose_action"
-        bot.send_message(chat_id, MSG_ASK_ACTION, reply_markup=action_keyboard(session["media_type"]))
-
-    elif data in ("act_bw", "act_mp3", "act_voice"):
-        session["action"] = data
-        if data == "act_mp3":
-            session["step"] = "ask_cover"
-            bot.send_message(chat_id, MSG_ASK_COVER, reply_markup=keep_change_remove_keyboard("cov"))
-        else:
-            session["step"] = "processing"
-            process_and_send(chat_id)
-
-    elif data == "cov_keep":
-        session["cover_mode"] = "keep"
-        session["cover_path"] = None
-        session["step"] = "ask_artist"
-        bot.send_message(chat_id, MSG_ASK_ARTIST, reply_markup=keep_change_remove_keyboard("art"))
-
-    elif data == "cov_change":
-        session["step"] = "waiting_cover"
-        bot.send_message(chat_id, MSG_SEND_COVER)
-
-    elif data == "cov_remove":
-        session["cover_mode"] = "remove"
-        session["cover_path"] = None
-        session["step"] = "ask_artist"
-        bot.send_message(chat_id, MSG_ASK_ARTIST, reply_markup=keep_change_remove_keyboard("art"))
-
-    elif data == "art_keep":
-        session["artist_mode"] = "keep"
-        session["artist_name"] = None
-        session["step"] = "ask_rename"
-        bot.send_message(chat_id, MSG_ASK_RENAME, reply_markup=yes_no_keyboard("ren"))
-
-    elif data == "art_change":
-        session["step"] = "waiting_artist"
-        bot.send_message(chat_id, MSG_SEND_ARTIST)
-
-    elif data == "art_remove":
-        session["artist_mode"] = "remove"
-        session["artist_name"] = None
-        session["step"] = "ask_rename"
-        bot.send_message(chat_id, MSG_ASK_RENAME, reply_markup=yes_no_keyboard("ren"))
-
-    elif data == "ren_yes":
-        session["step"] = "waiting_filename"
-        bot.send_message(chat_id, MSG_SEND_FILENAME)
-
-    elif data == "ren_no":
-        session["custom_name"] = None
-        session["step"] = "processing"
-        process_and_send(chat_id)
-
-
-bot.infinity_polling(skip_pending=True)
+    
