@@ -2,25 +2,21 @@ import os
 import subprocess
 import telebot
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-if not BOT_TOKEN:
-    raise RuntimeError("Set the BOT_TOKEN environment variable before starting the bot.")
-
+BOT_TOKEN = os.getenv("BOT_TOKEN", "9114458150:AAHpOOt4Hy0BFjVSjRNaC0OdyYHYnUYo4hQ")
 bot = telebot.TeleBot(BOT_TOKEN)
 
-BOT_BRAND = "𝖘𝖊𝟕𝖊𝖓 𝖋𝖎𝖑𝖙𝖊𝖗 𝖑𝖎𝖋𝖊"
+MSG_WELCOME = "𝖜𝖊𝖑𝖈𝖔𝖒𝖊 𝖜𝖎𝖙𝖍 𝖘𝖊𝟕𝖊𝖓"
+MSG_PROCESSING = "𝖕𝖗𝖔𝖈𝖊𝖘𝖘𝖎𝖓𝖌..."
+MSG_DONE = "𝖉𝖔𝖓𝖊 𝖇𝖆𝖇𝖊"
+MSG_ERROR = "𝖊𝖗𝖗𝖔𝖗 𝖇𝖆𝖇𝖊"
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
-    bot.reply_to(
-        message,
-        f"أهلاً بك في *{BOT_BRAND}* 🎬\nأرسل لي مقطع فيديو وسأرجعه لك بفلتر أبيض وأسود.",
-        parse_mode="Markdown"
-    )
+    bot.reply_to(message, MSG_WELCOME)
 
 @bot.message_handler(content_types=['video'])
 def handle_video(message):
-    msg = bot.reply_to(message, f"جاري تحويل المقطع عبر {BOT_BRAND}...")
+    msg = bot.reply_to(message, MSG_PROCESSING)
     file_info = bot.get_file(message.video.file_id)
     downloaded_file = bot.download_file(file_info.file_path)
 
@@ -34,22 +30,16 @@ def handle_video(message):
         command = [
             "ffmpeg", "-y", "-i", input_path,
             "-vf", "hue=s=0",
-            "-c:a", "copy",
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "24",
+            "-c:a", "aac", "-b:a", "128k",
             output_path
         ]
-        subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        result = subprocess.run(command, capture_output=True, text=True)
+
+        if result.returncode != 0 or not os.path.exists(output_path):
+            raise RuntimeError("ffmpeg failed")
 
         with open(output_path, 'rb') as video_out:
-            bot.send_video(message.chat.id, video_out, caption=f"تم التحويل بواسطة {BOT_BRAND}")
+            bot.send_video(message.chat.id, video_out, caption=MSG_DONE)
 
-        bot.delete_message(message.chat.id, msg.message_id)
-
-    except Exception as e:
-        bot.edit_message_text(f"حدث خطأ أثناء المعالجة: {e}", message.chat.id, msg.message_id)
-
-    finally:
-        for path in (input_path, output_path):
-            if os.path.exists(path):
-                os.remove(path)
-
-bot.infinity_polling()
+        bot.delete_message(message.chat
