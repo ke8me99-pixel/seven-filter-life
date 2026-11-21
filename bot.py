@@ -164,11 +164,12 @@ def probe_tags_and_cover(src_path: str, chat_id: int):
 
 
 def trim_media_file(src_path: str, dst_path: str, media_type: str, start_sec: float, end_sec: float, preserve_meta: bool = False):
+    duration = max(0.1, end_sec - start_sec)
     cmd = [
         "ffmpeg", "-y",
-        "-i", src_path,
         "-ss", str(start_sec),
-        "-to", str(end_sec),
+        "-t", str(duration),
+        "-i", src_path,
     ]
     if preserve_meta:
         cmd += ["-map_metadata", "0"]
@@ -176,18 +177,15 @@ def trim_media_file(src_path: str, dst_path: str, media_type: str, start_sec: fl
     if media_type == "video":
         cmd += ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "24", "-c:a", "aac", "-b:a", "128k"]
     elif media_type == "voice":
-        cmd += ["-c:a", "libopus", "-b:a", "64k"]
+        cmd += ["-vn", "-c:a", "libopus", "-b:a", "64k"]
     else:
-        if preserve_meta:
-            cmd += ["-map", "0:a", "-map", "0:v?"]
+        cmd += ["-vn"]
         if dst_path.lower().endswith(".ogg"):
             cmd += ["-c:a", "libopus", "-b:a", "64k"]
         elif dst_path.lower().endswith(".m4a") or dst_path.lower().endswith(".aac"):
             cmd += ["-c:a", "aac", "-b:a", "192k"]
         else:
             cmd += ["-c:a", "libmp3lame", "-b:a", "192k"]
-        if preserve_meta:
-            cmd += ["-c:v", "mjpeg", "-disposition:v:0", "attached_pic"]
 
     cmd.append(dst_path)
     run_ffmpeg(cmd)
@@ -216,39 +214,45 @@ def build_mp3_with_options(
     elif artist_mode == "keep" and orig_artist:
         final_artist = orig_artist
 
+    meta_args = ["-map_metadata", "0"]
+    if artist_mode in ("change", "keep") and final_artist:
+        meta_args += ["-metadata", f"artist={final_artist}", "-metadata", f"album_artist={final_artist}"]
+    elif artist_mode == "remove":
+        meta_args += ["-metadata", "artist=", "-metadata", "album_artist="]
+
+    if final_title:
+        meta_args += ["-metadata", f"title={final_title}"]
+
     if effective_cover:
-        cmd = [
+        cmd_with_cover = [
             "ffmpeg", "-y",
             "-i", active_input,
             "-i", effective_cover,
             "-map", "0:a",
             "-map", "1:v:0",
-            "-map_metadata", "0",
+            *meta_args,
             "-c:a", "libmp3lame", "-b:a", "192k",
             "-c:v", "mjpeg",
             "-id3v2_version", "3",
             "-disposition:v:0", "attached_pic",
+            temp_mp3,
         ]
-    else:
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", active_input,
-            "-vn",
-            "-map_metadata", "0",
-            "-c:a", "libmp3lame", "-b:a", "192k",
-            "-id3v2_version", "3",
-        ]
+        try:
+            run_ffmpeg(cmd_with_cover)
+            return effective_cover, final_artist
+        except Exception:
+            pass
 
-    if artist_mode in ("change", "keep") and final_artist:
-        cmd += ["-metadata", f"artist={final_artist}", "-metadata", f"album_artist={final_artist}"]
-    elif artist_mode == "remove":
-        cmd += ["-metadata", "artist=", "-metadata", "album_artist="]
-
-    if final_title:
-        cmd += ["-metadata", f"title={final_title}"]
-
-    cmd.append(temp_mp3)
-    run_ffmpeg(cmd)
+    cmd_no_cover = [
+        "ffmpeg", "-y",
+        "-i", active_input,
+        "-vn",
+        *meta_args,
+        "-c:a", "libmp3lame", "-b:a", "192k",
+        "-id3v2_version", "3",
+        temp_mp3,
+    ]
+    run_ffmpeg(cmd_no_cover)
     return effective_cover, final_artist
 
 
@@ -389,18 +393,33 @@ def process_and_send(chat_id: int, status_msg_id=None):
                     os.replace(temp_mp3, final_mp3)
                     session["extra_files"].append(final_mp3)
 
-                thumb_arg = open(effective_cover, "rb") if effective_cover and os.path.exists(effective_cover) else None
+                thumb_arg = None
+                if effective_cover and os.path.exists(effective_cover) and cover_mode != "remove":
+                    try:
+                        thumb_arg = open(effective_cover, "rb")
+                    except Exception:
+                        thumb_arg = None
 
                 try:
                     with open(final_mp3, "rb") as f:
-                        bot.send_audio(
-                            chat_id,
-                            f,
-                            caption=MSG_DONE,
-                            title=final_title,
-                            performer=final_artist,
-                            thumb=thumb_arg,
-                        )
+                        try:
+                            bot.send_audio(
+                                chat_id,
+                                f,
+                                caption=MSG_DONE,
+                                title=final_title,
+                                performer=final_artist,
+                                thumb=thumb_arg,
+                            )
+                        except Exception:
+                            f.seek(0)
+                            bot.send_audio(
+                                chat_id,
+                                f,
+                                caption=MSG_DONE,
+                                title=final_title,
+                                performer=final_artist,
+                            )
                 finally:
                     if thumb_arg:
                         thumb_arg.close()
