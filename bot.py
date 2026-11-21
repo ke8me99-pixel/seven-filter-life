@@ -12,9 +12,9 @@ MSG_WELCOME = "𝖜𝖊𝖑𝖈𝖔𝖒𝖊 𝖜𝖎𝖙𝖍 𝖘𝖊𝟕𝖊�
 MSG_ASK_CUT = "𝖈𝖚𝖙?"
 MSG_ASK_RANGE = "00:00 to 00:17"
 MSG_ASK_ACTION = "𝖈𝖍𝖔𝖔𝖘𝖊"
-MSG_ASK_COVER = "𝖈𝖔𝖛𝖊𝖗?"
+MSG_ASK_COVER = "𝖈𝖔𝖛𝖊𝖗"
 MSG_SEND_COVER = "𝖘𝖊𝖓𝖉 𝖕𝖍𝖔𝖙𝖔"
-MSG_ASK_ARTIST = "𝖆𝖗𝖙𝖎𝖘𝖙?"
+MSG_ASK_ARTIST = "𝖆𝖗𝖙𝖎𝖘𝖙"
 MSG_SEND_ARTIST = "𝖘𝖊𝖓𝖉 𝖓𝖆𝖒𝖊"
 MSG_ASK_RENAME = "𝖗𝖊𝖓𝖆𝖒𝖊?"
 MSG_SEND_FILENAME = "𝖘𝖊𝖓𝖉 𝖋𝖎𝖑𝖊 𝖓𝖆𝖒𝖊"
@@ -28,6 +28,10 @@ BTN_CUT_ONLY = "𝖈𝖚𝖙 𝖔𝖓𝖑𝖞"
 BTN_FILTER = "𝖋𝖎𝖑𝖙𝖊𝖗"
 BTN_MP3 = "𝖒𝖕3"
 BTN_VOICE = "𝖛𝖔𝖎𝖈𝖊"
+
+BTN_KEEP = "𝖐𝖊𝖊𝖕"
+BTN_CHANGE = "𝖈𝖍𝖆𝖓𝖌𝖊"
+BTN_REMOVE = "𝖗𝖊𝖒𝖔𝖛𝖊"
 
 user_sessions = {}
 
@@ -83,6 +87,16 @@ def yes_no_keyboard(prefix: str):
     kb.add(
         types.InlineKeyboardButton(BTN_YES, callback_data=f"{prefix}_yes"),
         types.InlineKeyboardButton(BTN_NO, callback_data=f"{prefix}_no"),
+    )
+    return kb
+
+
+def keep_change_remove_keyboard(prefix: str):
+    kb = types.InlineKeyboardMarkup(row_width=3)
+    kb.add(
+        types.InlineKeyboardButton(BTN_KEEP, callback_data=f"{prefix}_keep"),
+        types.InlineKeyboardButton(BTN_CHANGE, callback_data=f"{prefix}_change"),
+        types.InlineKeyboardButton(BTN_REMOVE, callback_data=f"{prefix}_remove"),
     )
     return kb
 
@@ -224,10 +238,13 @@ def process_and_send(chat_id: int, status_msg_id=None):
             elif action == "act_mp3":
                 temp_mp3 = f"out_audio_{chat_id}.mp3"
                 session["extra_files"].append(temp_mp3)
-                cover_path = session.get("cover_path")
-                artist = session.get("artist")
 
-                if cover_path and os.path.exists(cover_path):
+                cover_mode = session.get("cover_mode", "keep")
+                cover_path = session.get("cover_path")
+                artist_mode = session.get("artist_mode", "keep")
+                artist_name = session.get("artist_name")
+
+                if cover_mode == "change" and cover_path and os.path.exists(cover_path):
                     cmd = [
                         "ffmpeg", "-y",
                         "-i", active_input,
@@ -238,16 +255,30 @@ def process_and_send(chat_id: int, status_msg_id=None):
                         "-c:v", "mjpeg",
                         "-disposition:v:0", "attached_pic",
                     ]
-                else:
+                elif cover_mode == "remove":
                     cmd = [
                         "ffmpeg", "-y",
                         "-i", active_input,
                         "-vn",
+                        "-map_metadata", "0",
                         "-c:a", "libmp3lame", "-b:a", "192k",
                     ]
+                else:
+                    cmd = [
+                        "ffmpeg", "-y",
+                        "-i", active_input,
+                        "-map", "0:a",
+                        "-map", "0:v?",
+                        "-c:a", "libmp3lame", "-b:a", "192k",
+                        "-c:v", "copy",
+                        "-disposition:v:0", "attached_pic",
+                    ]
 
-                if artist:
-                    cmd += ["-metadata", f"artist={artist}", "-metadata", f"album_artist={artist}"]
+                if artist_mode == "change" and artist_name:
+                    cmd += ["-metadata", f"artist={artist_name}", "-metadata", f"album_artist={artist_name}"]
+                elif artist_mode == "remove":
+                    cmd += ["-metadata", "artist=", "-metadata", "album_artist="]
+
                 if custom_name:
                     cmd += ["-metadata", f"title={custom_name}"]
 
@@ -261,7 +292,7 @@ def process_and_send(chat_id: int, status_msg_id=None):
                     session["extra_files"].append(final_mp3)
 
                 thumb_arg = None
-                if cover_path and os.path.exists(cover_path):
+                if cover_mode == "change" and cover_path and os.path.exists(cover_path):
                     thumb_arg = open(cover_path, "rb")
 
                 try:
@@ -271,7 +302,7 @@ def process_and_send(chat_id: int, status_msg_id=None):
                             f,
                             caption=MSG_DONE,
                             title=custom_name if custom_name else None,
-                            performer=artist if artist else None,
+                            performer=artist_name if artist_mode == "change" and artist_name else None,
                             thumb=thumb_arg,
                         )
                 finally:
@@ -335,8 +366,10 @@ def start_media_flow(message, file_id: str, media_type: str, ext: str):
         "extra_files": [],
         "trim": None,
         "action": None,
+        "cover_mode": "keep",
         "cover_path": None,
-        "artist": None,
+        "artist_mode": "keep",
+        "artist_name": None,
         "custom_name": None,
     }
     bot.reply_to(message, MSG_ASK_CUT, reply_markup=cut_keyboard())
@@ -387,9 +420,10 @@ def on_photo(message):
     with open(cover_path, "wb") as f:
         f.write(downloaded)
 
+    session["cover_mode"] = "change"
     session["cover_path"] = cover_path
     session["step"] = "ask_artist"
-    bot.send_message(chat_id, MSG_ASK_ARTIST, reply_markup=yes_no_keyboard("art"))
+    bot.send_message(chat_id, MSG_ASK_ARTIST, reply_markup=keep_change_remove_keyboard("art"))
 
 
 @bot.message_handler(func=lambda m: True, content_types=["text"])
@@ -420,7 +454,8 @@ def on_text(message):
         if not text:
             bot.send_message(chat_id, MSG_ERROR)
             return
-        session["artist"] = text
+        session["artist_mode"] = "change"
+        session["artist_name"] = text
         session["step"] = "ask_rename"
         bot.send_message(chat_id, MSG_ASK_RENAME, reply_markup=yes_no_keyboard("ren"))
 
@@ -468,32 +503,42 @@ def on_callback(call):
         session["action"] = data
         if data == "act_mp3":
             session["step"] = "ask_cover"
-            bot.send_message(chat_id, MSG_ASK_COVER, reply_markup=yes_no_keyboard("cov"))
+            bot.send_message(chat_id, MSG_ASK_COVER, reply_markup=keep_change_remove_keyboard("cov"))
         else:
             session["step"] = "processing"
             process_and_send(chat_id)
 
-    elif data == "cov_yes":
+    elif data == "cov_keep":
+        session["cover_mode"] = "keep"
+        session["cover_path"] = None
+        session["step"] = "ask_artist"
+        bot.send_message(chat_id, MSG_ASK_ARTIST, reply_markup=keep_change_remove_keyboard("art"))
+
+    elif data == "cov_change":
         session["step"] = "waiting_cover"
         bot.send_message(chat_id, MSG_SEND_COVER)
 
-    elif data == "cov_no":
+    elif data == "cov_remove":
+        session["cover_mode"] = "remove"
         session["cover_path"] = None
         session["step"] = "ask_artist"
-        bot.send_message(chat_id, MSG_ASK_ARTIST, reply_markup=yes_no_keyboard("art"))
+        bot.send_message(chat_id, MSG_ASK_ARTIST, reply_markup=keep_change_remove_keyboard("art"))
 
-    elif data == "art_yes":
+    elif data == "art_keep":
+        session["artist_mode"] = "keep"
+        session["artist_name"] = None
+        session["step"] = "ask_rename"
+        bot.send_message(chat_id, MSG_ASK_RENAME, reply_markup=yes_no_keyboard("ren"))
+
+    elif data == "art_change":
         session["step"] = "waiting_artist"
         bot.send_message(chat_id, MSG_SEND_ARTIST)
 
-    elif data == "art_no":
-        session["artist"] = None
-        if session.get("action") == "act_mp3":
-            session["step"] = "ask_rename"
-            bot.send_message(chat_id, MSG_ASK_RENAME, reply_markup=yes_no_keyboard("ren"))
-        else:
-            session["step"] = "processing"
-            process_and_send(chat_id)
+    elif data == "art_remove":
+        session["artist_mode"] = "remove"
+        session["artist_name"] = None
+        session["step"] = "ask_rename"
+        bot.send_message(chat_id, MSG_ASK_RENAME, reply_markup=yes_no_keyboard("ren"))
 
     elif data == "ren_yes":
         session["step"] = "waiting_filename"
