@@ -1,6 +1,3 @@
-المستودع: ke8me99-pixel/seven-filter-life
-المسار: bot.py
-المحتوى:
 import os
 import subprocess
 import telebot
