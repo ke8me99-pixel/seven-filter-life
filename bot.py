@@ -10,6 +10,8 @@ if not BOT_TOKEN:
     BOT_TOKEN = "9114458150:AAHpOOt4Hy0BFjVSjRNaC0OdyYHYnUYo4hQ"
 
 ALLOWED_USER_ID = 1343392055
+STT_API_URL = os.getenv("STT_API_URL", "").strip()
+
 bot = telebot.TeleBot(BOT_TOKEN)
 
 MSG_WELCOME = "𝖜𝖊𝖑𝖈𝖔𝖒𝖊 𝖜𝖎𝖙𝖍 𝖘𝖊𝟕𝖊𝖓"
@@ -32,11 +34,7 @@ BTN_CUT_ONLY = "𝖈𝖚𝖙 𝖔𝖓𝖑𝖞"
 BTN_FILTER = "𝖋𝖎𝖑𝖙𝖊𝖗"
 BTN_MP3 = "𝖒𝖕3"
 BTN_VOICE = "𝖛𝖔𝖎𝖈𝖊"
-
 BTN_STT = "𝖘𝖙𝖙"
-BTN_FIND_SONG = "𝖋𝖎𝖓𝖉"
-BTN_VOCALS_ONLY = "𝖛𝖔𝖈𝖆𝖑𝖘"
-BTN_LYRICS_ONLY = "𝖑𝖞𝖗𝖎𝖈𝖘"
 
 BTN_KEEP = "𝖐𝖊𝖊𝖕"
 BTN_CHANGE = "𝖈𝖍𝖆𝖓𝖌𝖊"
@@ -122,15 +120,7 @@ def action_keyboard(media_type: str):
             types.InlineKeyboardButton(BTN_MP3, callback_data="act_mp3"),
             types.InlineKeyboardButton(BTN_VOICE, callback_data="act_voice"),
         )
-
-    kb.add(
-        types.InlineKeyboardButton(BTN_STT, callback_data="act_stt"),
-        types.InlineKeyboardButton(BTN_FIND_SONG, callback_data="act_find"),
-    )
-    kb.add(
-        types.InlineKeyboardButton(BTN_VOCALS_ONLY, callback_data="act_vocals"),
-        types.InlineKeyboardButton(BTN_LYRICS_ONLY, callback_data="act_lyrics"),
-    )
+    kb.add(types.InlineKeyboardButton(BTN_STT, callback_data="act_stt"))
     return kb
 
 
@@ -205,6 +195,23 @@ def trim_media_file(src_path: str, dst_path: str, media_type: str, start_sec: fl
 
     cmd.append(dst_path)
     run_ffmpeg(cmd)
+
+
+def transcribe_audio(chat_id: int, active_input: str, session: dict):
+    temp_audio = f"stt_{chat_id}.mp3"
+    session["extra_files"].append(temp_audio)
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", active_input,
+        "-vn",
+        "-c:a", "libmp3lame", "-b:a", "192k",
+        temp_audio,
+    ]
+    run_ffmpeg(cmd)
+
+    if not STT_API_URL:
+        raise RuntimeError("STT_API_URL not configured")
+    raise RuntimeError("STT endpoint not wired")
 
 
 def process_and_send(chat_id: int, status_msg_id=None):
@@ -392,8 +399,8 @@ def process_and_send(chat_id: int, status_msg_id=None):
                     if thumb_arg:
                         thumb_arg.close()
 
-            elif action in ("act_stt", "act_find", "act_vocals", "act_lyrics"):
-                raise RuntimeError("Feature not configured")
+            elif action == "act_stt":
+                transcribe_audio(chat_id, active_input, session)
 
         try:
             bot.delete_message(chat_id, status_msg_id)
@@ -594,7 +601,7 @@ def on_callback(call):
         session["step"] = "choose_action"
         bot.send_message(chat_id, MSG_ASK_ACTION, reply_markup=action_keyboard(session["media_type"]))
 
-    elif data in ("act_bw", "act_mp3", "act_voice", "act_stt", "act_find", "act_vocals", "act_lyrics"):
+    elif data in ("act_bw", "act_mp3", "act_voice", "act_stt"):
         session["action"] = data
         if data == "act_mp3":
             session["step"] = "ask_cover"
