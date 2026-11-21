@@ -150,7 +150,7 @@ def probe_tags_and_cover(src_path: str, chat_id: int):
     cov_out = f"orig_cov_{chat_id}.jpg"
     try:
         ext_res = subprocess.run(
-            ["ffmpeg", "-y", "-i", src_path, "-an", "-c:v", "mjpeg", "-frames:v", "1", cov_out],
+            ["ffmpeg", "-y", "-i", src_path, "-map", "0:v?", "-an", "-c:v", "mjpeg", "-frames:v", "1", cov_out],
             capture_output=True,
             text=True,
         )
@@ -332,19 +332,37 @@ def process_and_send(chat_id: int, status_msg_id=None):
                 artist_mode = session.get("artist_mode", "keep")
                 artist_name = session.get("artist_name")
 
-                effective_cover = None
                 if cover_mode == "change" and cover_path and os.path.exists(cover_path):
-                    effective_cover = cover_path
-                elif cover_mode == "keep" and orig_cover and os.path.exists(orig_cover):
-                    effective_cover = orig_cover
-
-                if effective_cover:
                     cmd = [
                         "ffmpeg", "-y",
                         "-i", active_input,
-                        "-i", effective_cover,
+                        "-i", cover_path,
                         "-map", "0:a",
                         "-map", "1:v",
+                        "-map_metadata", "0",
+                        "-c:a", "libmp3lame", "-b:a", "192k",
+                        "-c:v", "mjpeg",
+                        "-disposition:v:0", "attached_pic",
+                    ]
+                elif cover_mode == "keep" and orig_cover and os.path.exists(orig_cover):
+                    cmd = [
+                        "ffmpeg", "-y",
+                        "-i", active_input,
+                        "-i", orig_cover,
+                        "-map", "0:a",
+                        "-map", "1:v",
+                        "-map_metadata", "0",
+                        "-c:a", "libmp3lame", "-b:a", "192k",
+                        "-c:v", "mjpeg",
+                        "-disposition:v:0", "attached_pic",
+                    ]
+                elif cover_mode == "keep":
+                    cmd = [
+                        "ffmpeg", "-y",
+                        "-i", active_input,
+                        "-i", raw_path,
+                        "-map", "0:a",
+                        "-map", "1:v?",
                         "-map_metadata", "0",
                         "-c:a", "libmp3lame", "-b:a", "192k",
                         "-c:v", "mjpeg",
@@ -383,7 +401,9 @@ def process_and_send(chat_id: int, status_msg_id=None):
                     os.replace(temp_mp3, final_mp3)
                     session["extra_files"].append(final_mp3)
 
-                thumb_arg = open(effective_cover, "rb") if effective_cover else None
+                thumb_arg = None
+                if cover_mode == "change" and cover_path and os.path.exists(cover_path):
+                    thumb_arg = open(cover_path, "rb")
 
                 try:
                     with open(final_mp3, "rb") as f:
