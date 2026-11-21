@@ -10,8 +10,6 @@ if not BOT_TOKEN:
     BOT_TOKEN = "9114458150:AAHpOOt4Hy0BFjVSjRNaC0OdyYHYnUYo4hQ"
 
 ALLOWED_USER_ID = 1343392055
-STT_API_URL = os.getenv("STT_API_URL", "").strip()
-
 bot = telebot.TeleBot(BOT_TOKEN)
 
 MSG_WELCOME = "𝖜𝖊𝖑𝖈𝖔𝖒𝖊 𝖜𝖎𝖙𝖍 𝖘𝖊𝟕𝖊𝖓"
@@ -34,7 +32,6 @@ BTN_CUT_ONLY = "𝖈𝖚𝖙 𝖔𝖓𝖑𝖞"
 BTN_FILTER = "𝖋𝖎𝖑𝖙𝖊𝖗"
 BTN_MP3 = "𝖒𝖕3"
 BTN_VOICE = "𝖛𝖔𝖎𝖈𝖊"
-BTN_STT = "𝖘𝖙𝖙"
 
 BTN_KEEP = "𝖐𝖊𝖊𝖕"
 BTN_CHANGE = "𝖈𝖍𝖆𝖓𝖌𝖊"
@@ -120,7 +117,6 @@ def action_keyboard(media_type: str):
             types.InlineKeyboardButton(BTN_MP3, callback_data="act_mp3"),
             types.InlineKeyboardButton(BTN_VOICE, callback_data="act_voice"),
         )
-    kb.add(types.InlineKeyboardButton(BTN_STT, callback_data="act_stt"))
     return kb
 
 
@@ -197,21 +193,63 @@ def trim_media_file(src_path: str, dst_path: str, media_type: str, start_sec: fl
     run_ffmpeg(cmd)
 
 
-def transcribe_audio(chat_id: int, active_input: str, session: dict):
-    temp_audio = f"stt_{chat_id}.mp3"
-    session["extra_files"].append(temp_audio)
-    cmd = [
-        "ffmpeg", "-y",
-        "-i", active_input,
-        "-vn",
-        "-c:a", "libmp3lame", "-b:a", "192k",
-        temp_audio,
-    ]
-    run_ffmpeg(cmd)
+def build_mp3_with_options(
+    active_input: str,
+    temp_mp3: str,
+    cover_mode: str,
+    cover_path: str,
+    orig_cover: str,
+    artist_mode: str,
+    artist_name: str,
+    orig_artist: str,
+    final_title: str,
+):
+    effective_cover = None
+    if cover_mode == "change" and cover_path and os.path.exists(cover_path):
+        effective_cover = cover_path
+    elif cover_mode == "keep" and orig_cover and os.path.exists(orig_cover):
+        effective_cover = orig_cover
 
-    if not STT_API_URL:
-        raise RuntimeError("STT_API_URL not configured")
-    raise RuntimeError("STT endpoint not wired")
+    final_artist = None
+    if artist_mode == "change" and artist_name:
+        final_artist = artist_name
+    elif artist_mode == "keep" and orig_artist:
+        final_artist = orig_artist
+
+    if effective_cover:
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", active_input,
+            "-i", effective_cover,
+            "-map", "0:a",
+            "-map", "1:v:0",
+            "-map_metadata", "0",
+            "-c:a", "libmp3lame", "-b:a", "192k",
+            "-c:v", "mjpeg",
+            "-id3v2_version", "3",
+            "-disposition:v:0", "attached_pic",
+        ]
+    else:
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", active_input,
+            "-vn",
+            "-map_metadata", "0",
+            "-c:a", "libmp3lame", "-b:a", "192k",
+            "-id3v2_version", "3",
+        ]
+
+    if artist_mode in ("change", "keep") and final_artist:
+        cmd += ["-metadata", f"artist={final_artist}", "-metadata", f"album_artist={final_artist}"]
+    elif artist_mode == "remove":
+        cmd += ["-metadata", "artist=", "-metadata", "album_artist="]
+
+    if final_title:
+        cmd += ["-metadata", f"title={final_title}"]
+
+    cmd.append(temp_mp3)
+    run_ffmpeg(cmd)
+    return effective_cover, final_artist
 
 
 def process_and_send(chat_id: int, status_msg_id=None):
@@ -331,69 +369,19 @@ def process_and_send(chat_id: int, status_msg_id=None):
                 cover_path = session.get("cover_path")
                 artist_mode = session.get("artist_mode", "keep")
                 artist_name = session.get("artist_name")
-
-                if cover_mode == "change" and cover_path and os.path.exists(cover_path):
-                    cmd = [
-                        "ffmpeg", "-y",
-                        "-i", active_input,
-                        "-i", cover_path,
-                        "-map", "0:a",
-                        "-map", "1:v",
-                        "-map_metadata", "0",
-                        "-c:a", "libmp3lame", "-b:a", "192k",
-                        "-c:v", "mjpeg",
-                        "-disposition:v:0", "attached_pic",
-                    ]
-                elif cover_mode == "keep" and orig_cover and os.path.exists(orig_cover):
-                    cmd = [
-                        "ffmpeg", "-y",
-                        "-i", active_input,
-                        "-i", orig_cover,
-                        "-map", "0:a",
-                        "-map", "1:v",
-                        "-map_metadata", "0",
-                        "-c:a", "libmp3lame", "-b:a", "192k",
-                        "-c:v", "mjpeg",
-                        "-disposition:v:0", "attached_pic",
-                    ]
-                elif cover_mode == "keep":
-                    cmd = [
-                        "ffmpeg", "-y",
-                        "-i", active_input,
-                        "-i", raw_path,
-                        "-map", "0:a",
-                        "-map", "1:v?",
-                        "-map_metadata", "0",
-                        "-c:a", "libmp3lame", "-b:a", "192k",
-                        "-c:v", "mjpeg",
-                        "-disposition:v:0", "attached_pic",
-                    ]
-                else:
-                    cmd = [
-                        "ffmpeg", "-y",
-                        "-i", active_input,
-                        "-vn",
-                        "-map_metadata", "0",
-                        "-c:a", "libmp3lame", "-b:a", "192k",
-                    ]
-
-                final_artist = None
-                if artist_mode == "change" and artist_name:
-                    final_artist = artist_name
-                    cmd += ["-metadata", f"artist={final_artist}", "-metadata", f"album_artist={final_artist}"]
-                elif artist_mode == "keep" and orig_artist:
-                    final_artist = orig_artist
-                    cmd += ["-metadata", f"artist={final_artist}", "-metadata", f"album_artist={final_artist}"]
-                elif artist_mode == "remove":
-                    final_artist = None
-                    cmd += ["-metadata", "artist=", "-metadata", "album_artist="]
-
                 final_title = custom_name if custom_name else orig_title
-                if final_title:
-                    cmd += ["-metadata", f"title={final_title}"]
 
-                cmd.append(temp_mp3)
-                run_ffmpeg(cmd)
+                effective_cover, final_artist = build_mp3_with_options(
+                    active_input=active_input,
+                    temp_mp3=temp_mp3,
+                    cover_mode=cover_mode,
+                    cover_path=cover_path,
+                    orig_cover=orig_cover,
+                    artist_mode=artist_mode,
+                    artist_name=artist_name,
+                    orig_artist=orig_artist,
+                    final_title=final_title,
+                )
 
                 final_mp3 = temp_mp3
                 if custom_name:
@@ -401,9 +389,7 @@ def process_and_send(chat_id: int, status_msg_id=None):
                     os.replace(temp_mp3, final_mp3)
                     session["extra_files"].append(final_mp3)
 
-                thumb_arg = None
-                if cover_mode == "change" and cover_path and os.path.exists(cover_path):
-                    thumb_arg = open(cover_path, "rb")
+                thumb_arg = open(effective_cover, "rb") if effective_cover and os.path.exists(effective_cover) else None
 
                 try:
                     with open(final_mp3, "rb") as f:
@@ -419,15 +405,13 @@ def process_and_send(chat_id: int, status_msg_id=None):
                     if thumb_arg:
                         thumb_arg.close()
 
-            elif action == "act_stt":
-                transcribe_audio(chat_id, active_input, session)
-
         try:
             bot.delete_message(chat_id, status_msg_id)
         except Exception:
             pass
 
-    except Exception:
+    except Exception as e:
+        print("PROCESS_ERROR:", repr(e), flush=True)
         try:
             bot.edit_message_text(MSG_ERROR, chat_id, status_msg_id)
         except Exception:
@@ -621,7 +605,7 @@ def on_callback(call):
         session["step"] = "choose_action"
         bot.send_message(chat_id, MSG_ASK_ACTION, reply_markup=action_keyboard(session["media_type"]))
 
-    elif data in ("act_bw", "act_mp3", "act_voice", "act_stt"):
+    elif data in ("act_bw", "act_mp3", "act_voice"):
         session["action"] = data
         if data == "act_mp3":
             session["step"] = "ask_cover"
