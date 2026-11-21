@@ -5,6 +5,7 @@ import telebot
 from telebot import types
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "9114458150:AAHpOOt4Hy0BFjVSjRNaC0OdyYHYnUYo4hQ")
+ALLOWED_USER_ID = 1343392055
 bot = telebot.TeleBot(BOT_TOKEN)
 
 MSG_WELCOME = "𝖜𝖊𝖑𝖈𝖔𝖒𝖊 𝖜𝖎𝖙𝖍 𝖘𝖊𝟕𝖊𝖓"
@@ -15,17 +16,31 @@ MSG_ASK_COVER = "𝖈𝖔𝖛𝖊𝖗?"
 MSG_SEND_COVER = "𝖘𝖊𝖓𝖉 𝖕𝖍𝖔𝖙𝖔"
 MSG_ASK_ARTIST = "𝖆𝖗𝖙𝖎𝖘𝖙?"
 MSG_SEND_ARTIST = "𝖘𝖊𝖓𝖉 𝖓𝖆𝖒𝖊"
+MSG_ASK_RENAME = "𝖗𝖊𝖓𝖆𝖒𝖊?"
+MSG_SEND_FILENAME = "𝖘𝖊𝖓𝖉 𝖋𝖎𝖑𝖊 𝖓𝖆𝖒𝖊"
 MSG_PROCESSING = "𝖕𝖗𝖔𝖈𝖊𝖘𝖘𝖎𝖓𝖌..."
 MSG_DONE = "𝖉𝖔𝖓𝖊 𝖇𝖆𝖇𝖊"
 MSG_ERROR = "𝖊𝖗𝖗𝖔𝖗 𝖇𝖆𝖇𝖊"
 
 BTN_YES = "𝖞𝖊𝖘"
 BTN_NO = "𝖓𝖔"
+BTN_CUT_ONLY = "𝖈𝖚𝖙 𝖔𝖓𝖑𝖞"
 BTN_FILTER = "𝖋𝖎𝖑𝖙𝖊𝖗"
 BTN_MP3 = "𝖒𝖕3"
 BTN_VOICE = "𝖛𝖔𝖎𝖈𝖊"
 
 user_sessions = {}
+
+
+def is_allowed(user_id) -> bool:
+    return user_id == ALLOWED_USER_ID
+
+
+def sanitize_filename(name: str) -> str:
+    cleaned = re.sub(r'[\\/*?:"<>|\r\n]+', "_", name).strip()
+    if cleaned.lower().endswith(".mp3"):
+        cleaned = cleaned[:-4].strip()
+    return cleaned or "audio"
 
 
 def parse_time_to_seconds(t_str: str) -> float:
@@ -54,10 +69,11 @@ def parse_trim_range(text: str):
 
 
 def cut_keyboard():
-    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb = types.InlineKeyboardMarkup(row_width=3)
     kb.add(
         types.InlineKeyboardButton(BTN_YES, callback_data="cut_yes"),
         types.InlineKeyboardButton(BTN_NO, callback_data="cut_no"),
+        types.InlineKeyboardButton(BTN_CUT_ONLY, callback_data="cut_only"),
     )
     return kb
 
@@ -93,32 +109,27 @@ def run_ffmpeg(cmd: list):
         raise RuntimeError(res.stderr[-300:] if res.stderr else "ffmpeg error")
 
 
-def prepare_trimmed_input(session: dict, chat_id: int) -> str:
-    src_path = session["raw_path"]
-    ext = session["ext"]
-    trim = session.get("trim")
-    if not trim:
-        return src_path
-
-    start_sec, end_sec = trim
-    trimmed_path = f"trim_{chat_id}{ext}"
+def trim_media_file(src_path: str, dst_path: str, media_type: str, start_sec: float, end_sec: float):
     cmd = [
         "ffmpeg", "-y",
         "-ss", str(start_sec),
         "-to", str(end_sec),
         "-i", src_path,
     ]
-    if session["media_type"] == "video":
+    if media_type == "video":
         cmd += ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "24", "-c:a", "aac", "-b:a", "128k"]
-    elif session["media_type"] == "audio":
-        cmd += ["-c:a", "libmp3lame", "-b:a", "192k"]
-    else:
+    elif media_type == "voice":
         cmd += ["-c:a", "libopus", "-b:a", "64k"]
+    else:
+        if dst_path.lower().endswith(".ogg"):
+            cmd += ["-c:a", "libopus", "-b:a", "64k"]
+        elif dst_path.lower().endswith(".m4a") or dst_path.lower().endswith(".aac"):
+            cmd += ["-c:a", "aac", "-b:a", "192k"]
+        else:
+            cmd += ["-c:a", "libmp3lame", "-b:a", "192k"]
 
-    cmd.append(trimmed_path)
+    cmd.append(dst_path)
     run_ffmpeg(cmd)
-    session["extra_files"].append(trimmed_path)
-    return trimmed_path
 
 
 def process_and_send(chat_id: int, status_msg_id=None):
@@ -136,82 +147,136 @@ def process_and_send(chat_id: int, status_msg_id=None):
             pass
 
     try:
-        active_input = prepare_trimmed_input(session, chat_id)
+        raw_path = session["raw_path"]
+        media_type = session["media_type"]
+        ext = session["ext"]
         action = session["action"]
+        trim = session.get("trim")
+        custom_name = session.get("custom_name")
 
-        if action == "act_bw":
-            out_path = f"out_bw_{chat_id}.mp4"
-            session["extra_files"].append(out_path)
-            cmd = [
-                "ffmpeg", "-y", "-i", active_input,
-                "-vf", "hue=s=0",
-                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "24",
-                "-c:a", "aac", "-b:a", "128k",
-                out_path,
-            ]
-            run_ffmpeg(cmd)
-            with open(out_path, "rb") as f:
-                bot.send_video(chat_id, f, caption=MSG_DONE)
+        if action == "cut_only":
+            if not trim:
+                raise ValueError("Missing trim range")
+            start_sec, end_sec = trim
+            base_out = f"cut_only_{chat_id}{ext}"
+            trim_media_file(raw_path, base_out, media_type, start_sec, end_sec)
+            session["extra_files"].append(base_out)
 
-        elif action == "act_voice":
-            out_path = f"out_voice_{chat_id}.ogg"
-            session["extra_files"].append(out_path)
-            cmd = [
-                "ffmpeg", "-y", "-i", active_input,
-                "-vn", "-c:a", "libopus", "-b:a", "64k",
-                out_path,
-            ]
-            run_ffmpeg(cmd)
-            with open(out_path, "rb") as f:
-                bot.send_voice(chat_id, f, caption=MSG_DONE)
+            final_path = base_out
+            if custom_name:
+                final_path = f"{custom_name}{ext}"
+                os.replace(base_out, final_path)
+                session["extra_files"].append(final_path)
 
-        elif action == "act_mp3":
-            out_path = f"out_audio_{chat_id}.mp3"
-            session["extra_files"].append(out_path)
-            cover_path = session.get("cover_path")
-            artist = session.get("artist")
+            with open(final_path, "rb") as f:
+                if media_type == "video":
+                    bot.send_video(chat_id, f, caption=MSG_DONE)
+                elif media_type == "voice":
+                    bot.send_voice(chat_id, f, caption=MSG_DONE)
+                else:
+                    bot.send_audio(chat_id, f, caption=MSG_DONE)
 
-            if cover_path and os.path.exists(cover_path):
+        else:
+            active_input = raw_path
+            if trim:
+                start_sec, end_sec = trim
+                trimmed_path = f"trim_{chat_id}{ext}"
+                trim_media_file(raw_path, trimmed_path, media_type, start_sec, end_sec)
+                session["extra_files"].append(trimmed_path)
+                active_input = trimmed_path
+
+            if action == "act_bw":
+                out_path = f"out_bw_{chat_id}.mp4"
+                session["extra_files"].append(out_path)
                 cmd = [
-                    "ffmpeg", "-y",
-                    "-i", active_input,
-                    "-i", cover_path,
-                    "-map", "0:a",
-                    "-map", "1:v",
-                    "-c:a", "libmp3lame", "-b:a", "192k",
-                    "-c:v", "mjpeg",
-                    "-disposition:v:0", "attached_pic",
+                    "ffmpeg", "-y", "-i", active_input,
+                    "-vf", "hue=s=0",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "24",
+                    "-c:a", "aac", "-b:a", "128k",
+                    out_path,
                 ]
-            else:
-                cmd = [
-                    "ffmpeg", "-y",
-                    "-i", active_input,
-                    "-vn",
-                    "-c:a", "libmp3lame", "-b:a", "192k",
-                ]
-
-            if artist:
-                cmd += ["-metadata", f"artist={artist}", "-metadata", f"album_artist={artist}"]
-
-            cmd.append(out_path)
-            run_ffmpeg(cmd)
-
-            thumb_arg = None
-            if cover_path and os.path.exists(cover_path):
-                thumb_arg = open(cover_path, "rb")
-
-            try:
+                run_ffmpeg(cmd)
+                if custom_name:
+                    renamed_path = f"{custom_name}.mp4"
+                    os.replace(out_path, renamed_path)
+                    session["extra_files"].append(renamed_path)
+                    out_path = renamed_path
                 with open(out_path, "rb") as f:
-                    bot.send_audio(
-                        chat_id,
-                        f,
-                        caption=MSG_DONE,
-                        performer=artist if artist else None,
-                        thumb=thumb_arg,
-                    )
-            finally:
-                if thumb_arg:
-                    thumb_arg.close()
+                    bot.send_video(chat_id, f, caption=MSG_DONE)
+
+            elif action == "act_voice":
+                out_path = f"out_voice_{chat_id}.ogg"
+                session["extra_files"].append(out_path)
+                cmd = [
+                    "ffmpeg", "-y", "-i", active_input,
+                    "-vn", "-c:a", "libopus", "-b:a", "64k",
+                    out_path,
+                ]
+                run_ffmpeg(cmd)
+                if custom_name:
+                    renamed_path = f"{custom_name}.ogg"
+                    os.replace(out_path, renamed_path)
+                    session["extra_files"].append(renamed_path)
+                    out_path = renamed_path
+                with open(out_path, "rb") as f:
+                    bot.send_voice(chat_id, f, caption=MSG_DONE)
+
+            elif action == "act_mp3":
+                temp_mp3 = f"out_audio_{chat_id}.mp3"
+                session["extra_files"].append(temp_mp3)
+                cover_path = session.get("cover_path")
+                artist = session.get("artist")
+
+                if cover_path and os.path.exists(cover_path):
+                    cmd = [
+                        "ffmpeg", "-y",
+                        "-i", active_input,
+                        "-i", cover_path,
+                        "-map", "0:a",
+                        "-map", "1:v",
+                        "-c:a", "libmp3lame", "-b:a", "192k",
+                        "-c:v", "mjpeg",
+                        "-disposition:v:0", "attached_pic",
+                    ]
+                else:
+                    cmd = [
+                        "ffmpeg", "-y",
+                        "-i", active_input,
+                        "-vn",
+                        "-c:a", "libmp3lame", "-b:a", "192k",
+                    ]
+
+                if artist:
+                    cmd += ["-metadata", f"artist={artist}", "-metadata", f"album_artist={artist}"]
+                if custom_name:
+                    cmd += ["-metadata", f"title={custom_name}"]
+
+                cmd.append(temp_mp3)
+                run_ffmpeg(cmd)
+
+                final_mp3 = temp_mp3
+                if custom_name:
+                    final_mp3 = f"{custom_name}.mp3"
+                    os.replace(temp_mp3, final_mp3)
+                    session["extra_files"].append(final_mp3)
+
+                thumb_arg = None
+                if cover_path and os.path.exists(cover_path):
+                    thumb_arg = open(cover_path, "rb")
+
+                try:
+                    with open(final_mp3, "rb") as f:
+                        bot.send_audio(
+                            chat_id,
+                            f,
+                            caption=MSG_DONE,
+                            title=custom_name if custom_name else None,
+                            performer=artist if artist else None,
+                            thumb=thumb_arg,
+                        )
+                finally:
+                    if thumb_arg:
+                        thumb_arg.close()
 
         try:
             bot.delete_message(chat_id, status_msg_id)
@@ -272,33 +337,44 @@ def start_media_flow(message, file_id: str, media_type: str, ext: str):
         "action": None,
         "cover_path": None,
         "artist": None,
+        "custom_name": None,
     }
     bot.reply_to(message, MSG_ASK_CUT, reply_markup=cut_keyboard())
 
 
 @bot.message_handler(commands=["start"])
 def send_welcome(message):
+    if not message.from_user or not is_allowed(message.from_user.id):
+        return
     bot.reply_to(message, MSG_WELCOME)
 
 
 @bot.message_handler(content_types=["video"])
 def on_video(message):
+    if not message.from_user or not is_allowed(message.from_user.id):
+        return
     start_media_flow(message, message.video.file_id, "video", ".mp4")
 
 
 @bot.message_handler(content_types=["audio"])
 def on_audio(message):
+    if not message.from_user or not is_allowed(message.from_user.id):
+        return
     ext = os.path.splitext(message.audio.file_name or "")[1].lower() or ".mp3"
     start_media_flow(message, message.audio.file_id, "audio", ext)
 
 
 @bot.message_handler(content_types=["voice"])
 def on_voice(message):
+    if not message.from_user or not is_allowed(message.from_user.id):
+        return
     start_media_flow(message, message.voice.file_id, "voice", ".ogg")
 
 
 @bot.message_handler(content_types=["photo"])
 def on_photo(message):
+    if not message.from_user or not is_allowed(message.from_user.id):
+        return
     chat_id = message.chat.id
     session = user_sessions.get(chat_id)
     if not session or session.get("step") != "waiting_cover":
@@ -318,6 +394,8 @@ def on_photo(message):
 
 @bot.message_handler(func=lambda m: True, content_types=["text"])
 def on_text(message):
+    if not message.from_user or not is_allowed(message.from_user.id):
+        return
     chat_id = message.chat.id
     session = user_sessions.get(chat_id)
     if not session:
@@ -329,8 +407,12 @@ def on_text(message):
     if step == "waiting_range":
         try:
             session["trim"] = parse_trim_range(text)
-            session["step"] = "choose_action"
-            bot.send_message(chat_id, MSG_ASK_ACTION, reply_markup=action_keyboard(session["media_type"]))
+            if session.get("action") == "cut_only":
+                session["step"] = "ask_rename"
+                bot.send_message(chat_id, MSG_ASK_RENAME, reply_markup=yes_no_keyboard("ren"))
+            else:
+                session["step"] = "choose_action"
+                bot.send_message(chat_id, MSG_ASK_ACTION, reply_markup=action_keyboard(session["media_type"]))
         except Exception:
             bot.send_message(chat_id, MSG_ERROR)
 
@@ -339,12 +421,23 @@ def on_text(message):
             bot.send_message(chat_id, MSG_ERROR)
             return
         session["artist"] = text
+        session["step"] = "ask_rename"
+        bot.send_message(chat_id, MSG_ASK_RENAME, reply_markup=yes_no_keyboard("ren"))
+
+    elif step == "waiting_filename":
+        cleaned = sanitize_filename(text)
+        if not cleaned:
+            bot.send_message(chat_id, MSG_ERROR)
+            return
+        session["custom_name"] = cleaned
         session["step"] = "processing"
         process_and_send(chat_id)
 
 
 @bot.callback_query_handler(func=lambda call: True)
 def on_callback(call):
+    if not call.from_user or not is_allowed(call.from_user.id):
+        return
     chat_id = call.message.chat.id
     data = call.data
     session = user_sessions.get(chat_id)
@@ -356,11 +449,18 @@ def on_callback(call):
     bot.answer_callback_query(call.id)
 
     if data == "cut_yes":
+        session["action"] = None
+        session["step"] = "waiting_range"
+        bot.send_message(chat_id, MSG_ASK_RANGE)
+
+    elif data == "cut_only":
+        session["action"] = "cut_only"
         session["step"] = "waiting_range"
         bot.send_message(chat_id, MSG_ASK_RANGE)
 
     elif data == "cut_no":
         session["trim"] = None
+        session["action"] = None
         session["step"] = "choose_action"
         bot.send_message(chat_id, MSG_ASK_ACTION, reply_markup=action_keyboard(session["media_type"]))
 
@@ -388,6 +488,19 @@ def on_callback(call):
 
     elif data == "art_no":
         session["artist"] = None
+        if session.get("action") == "act_mp3":
+            session["step"] = "ask_rename"
+            bot.send_message(chat_id, MSG_ASK_RENAME, reply_markup=yes_no_keyboard("ren"))
+        else:
+            session["step"] = "processing"
+            process_and_send(chat_id)
+
+    elif data == "ren_yes":
+        session["step"] = "waiting_filename"
+        bot.send_message(chat_id, MSG_SEND_FILENAME)
+
+    elif data == "ren_no":
+        session["custom_name"] = None
         session["step"] = "processing"
         process_and_send(chat_id)
 
